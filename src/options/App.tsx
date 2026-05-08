@@ -1,7 +1,8 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import type {
   AuditEntry,
   CommitMode,
+  Origin,
   Workflow,
   Workspace,
 } from '@/shared/types';
@@ -14,6 +15,13 @@ import {
   updateSettings,
   watchWorkspace,
 } from '@/shared/storage';
+import {
+  hasOriginPermission,
+  removeOriginPermission,
+  requestOriginPermission,
+  watchPermissions,
+} from '@/shared/permissions';
+import { newId } from '@/shared/ids';
 
 type Tab = 'pages' | 'workflows' | 'audit' | 'settings';
 
@@ -83,44 +91,219 @@ function PagesView({ ws }: { ws: Workspace }) {
   const origins = Object.values(ws.origins);
   return (
     <div className="space-y-6">
-      <h2 className="text-lg font-semibold">Pages</h2>
+      <header className="flex items-baseline justify-between">
+        <h2 className="text-lg font-semibold">Pages</h2>
+      </header>
+      <AddOriginForm ws={ws} />
       {origins.length === 0 && (
         <p className="text-slate-400 text-sm">
-          No origins yet. Switch to Settings → Permissions to enable one.
+          No origins yet. Add one above (e.g.{' '}
+          <code>https://england.medicus.health</code>).
         </p>
       )}
       {origins.map((o) => (
-        <section key={o.origin} className="border border-slate-800 rounded p-4">
-          <header className="flex items-baseline justify-between">
-            <div>
-              <h3 className="font-semibold">{o.label}</h3>
-              <code className="text-xs text-slate-400">{o.origin}</code>
-            </div>
-          </header>
-          <div className="mt-3 grid gap-3">
-            {o.pages.map((p) => (
-              <div key={p.id} className="border border-slate-900 rounded p-3">
-                <div className="text-sm font-medium mb-2">{p.name}</div>
-                <ul className="grid grid-cols-3 gap-2 text-xs">
-                  {p.buttons.map((b) => (
-                    <li key={b.id} className="border border-slate-800 rounded p-2">
-                      <div className="font-semibold">
-                        {b.icon} {b.label}
-                      </div>
-                      <div className="text-slate-400">
-                        {b.action.kind === 'WORKFLOW'
-                          ? ws.workflows[b.action.workflowId]?.name ?? '?'
-                          : b.action.step.type}
-                      </div>
-                    </li>
-                  ))}
-                </ul>
-              </div>
-            ))}
-          </div>
-        </section>
+        <OriginSection key={o.origin} ws={ws} origin={o} />
       ))}
     </div>
+  );
+}
+
+function OriginSection({ ws, origin }: { ws: Workspace; origin: Origin }) {
+  const [granted, setGranted] = useState<boolean | null>(null);
+  const refresh = useCallback(async () => {
+    setGranted(await hasOriginPermission(origin.origin));
+  }, [origin.origin]);
+  useEffect(() => {
+    void refresh();
+    return watchPermissions(refresh);
+  }, [refresh]);
+
+  const enable = async () => {
+    const ok = await requestOriginPermission(origin.origin);
+    if (!ok) {
+      alert(
+        'Permission was not granted. Triska only works on origins you explicitly enable.',
+      );
+    }
+    void refresh();
+  };
+  const disable = async () => {
+    if (
+      !window.confirm(
+        `Revoke host permission for ${origin.origin}? The deck will stop showing on tabs of that origin.`,
+      )
+    )
+      return;
+    await removeOriginPermission(origin.origin);
+    void refresh();
+  };
+  const removeOrigin = async () => {
+    if (
+      !window.confirm(
+        `Delete origin ${origin.origin} and its pages from the workspace? Workflows are kept.`,
+      )
+    )
+      return;
+    const next = { ...ws, origins: { ...ws.origins } };
+    delete next.origins[origin.origin];
+    await saveWorkspace(next);
+    if (granted) await removeOriginPermission(origin.origin);
+  };
+
+  return (
+    <section className="border border-slate-800 rounded p-4">
+      <header className="flex items-baseline justify-between gap-3">
+        <div>
+          <h3 className="font-semibold">{origin.label}</h3>
+          <code className="text-xs text-slate-400">{origin.origin}</code>
+        </div>
+        <div className="flex items-center gap-2">
+          <span
+            className={`text-xs px-2 py-0.5 rounded ${
+              granted
+                ? 'bg-green-900 text-green-200'
+                : 'bg-amber-900 text-amber-200'
+            }`}
+          >
+            {granted === null ? '…' : granted ? 'Enabled' : 'Not enabled'}
+          </span>
+          {granted ? (
+            <button
+              onClick={disable}
+              className="text-xs px-2 py-1 bg-slate-800 rounded"
+            >
+              Disable
+            </button>
+          ) : (
+            <button
+              onClick={enable}
+              className="text-xs px-2 py-1 bg-sky-700 rounded"
+            >
+              Enable
+            </button>
+          )}
+          <button
+            onClick={removeOrigin}
+            className="text-xs px-2 py-1 bg-red-900 rounded"
+          >
+            Remove
+          </button>
+        </div>
+      </header>
+      {!granted && (
+        <p className="text-xs text-amber-300/80 mt-2">
+          Click Enable to grant Chrome host permission for this origin. Open
+          tabs of this origin will reload automatically so the deck appears.
+        </p>
+      )}
+      <div className="mt-3 grid gap-3">
+        {origin.pages.map((p) => (
+          <div key={p.id} className="border border-slate-900 rounded p-3">
+            <div className="text-sm font-medium mb-2">{p.name}</div>
+            <ul className="grid grid-cols-3 gap-2 text-xs">
+              {p.buttons.map((b) => (
+                <li key={b.id} className="border border-slate-800 rounded p-2">
+                  <div className="font-semibold">
+                    {b.icon} {b.label}
+                  </div>
+                  <div className="text-slate-400">
+                    {b.action.kind === 'WORKFLOW'
+                      ? ws.workflows[b.action.workflowId]?.name ?? '?'
+                      : b.action.step.type}
+                  </div>
+                </li>
+              ))}
+              {p.buttons.length === 0 && (
+                <li className="text-slate-500 text-xs">No buttons yet.</li>
+              )}
+            </ul>
+          </div>
+        ))}
+        {origin.pages.length === 0 && (
+          <p className="text-xs text-slate-500">
+            No pages yet. Record a workflow on this origin to add one.
+          </p>
+        )}
+      </div>
+    </section>
+  );
+}
+
+function AddOriginForm({ ws }: { ws: Workspace }) {
+  const [originUrl, setOriginUrl] = useState('');
+  const [label, setLabel] = useState('');
+  const submit = async () => {
+    let normalised = originUrl.trim();
+    if (!normalised) return;
+    try {
+      const u = new URL(normalised);
+      normalised = `${u.protocol}//${u.host}`;
+    } catch {
+      alert('Enter a valid origin URL, e.g. https://example.com');
+      return;
+    }
+    if (ws.origins[normalised]) {
+      alert('That origin already exists.');
+      return;
+    }
+    const next = {
+      ...ws,
+      origins: {
+        ...ws.origins,
+        [normalised]: {
+          origin: normalised,
+          label: label.trim() || normalised.replace(/^https?:\/\//, ''),
+          pages: [
+            {
+              id: newId('page'),
+              name: 'Default',
+              buttons: [],
+            },
+          ],
+        },
+      },
+    };
+    await saveWorkspace(next);
+    setOriginUrl('');
+    setLabel('');
+    // Prompt for permission immediately while we still have a user gesture.
+    const ok = await requestOriginPermission(normalised);
+    if (!ok) {
+      alert(
+        'Origin added, but permission was not granted. Click Enable on the origin section to retry.',
+      );
+    }
+  };
+  return (
+    <form
+      onSubmit={(e) => {
+        e.preventDefault();
+        void submit();
+      }}
+      className="border border-slate-800 rounded p-3 flex flex-wrap gap-2 items-end"
+    >
+      <div className="flex flex-col">
+        <label className="text-xs text-slate-400">Origin URL</label>
+        <input
+          value={originUrl}
+          onChange={(e) => setOriginUrl(e.target.value)}
+          placeholder="https://england.medicus.health"
+          className="bg-slate-900 border border-slate-800 rounded px-2 py-1 text-sm w-72"
+        />
+      </div>
+      <div className="flex flex-col">
+        <label className="text-xs text-slate-400">Label</label>
+        <input
+          value={label}
+          onChange={(e) => setLabel(e.target.value)}
+          placeholder="Medicus"
+          className="bg-slate-900 border border-slate-800 rounded px-2 py-1 text-sm w-40"
+        />
+      </div>
+      <button type="submit" className="px-3 py-1 bg-sky-700 rounded text-sm">
+        Add origin
+      </button>
+    </form>
   );
 }
 

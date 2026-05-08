@@ -9,7 +9,9 @@ arming mechanism for end-to-end execution.
 
 ## Status
 
-This repository is at **Phase 0–6 scaffold** of the build sequence in the plan.
+This repository implements **Phases 0–7** of the build sequence in the plan
+(everything bar polish items: hotkey-binding UI, icon library, and first-run
+onboarding modal).
 
 Implemented:
 
@@ -24,16 +26,23 @@ Implemented:
 - Action executor for `NAVIGATE`, `CLICK`, `INJECT_TEXT`, `WAIT_FOR_DOM`
   primitives with the **safety catch** (SAFE / CONFIRM / LIVE), submit-class
   detection, draft snapshot + rollback on abort, and audit logging.
+- **Workflow recorder** — captures clicks, key presses, focus changes and
+  navigations; generates three-candidate selectors per element (CSS path on
+  stable attributes, role + accessible name, text fallback); compresses
+  duplicate clicks and merges adjacent typing into a single `INJECT_TEXT`;
+  rewrites a click that triggers navigation as a `NAVIGATE`. Post-stop save
+  modal lets the user name the workflow, reorder/delete steps, insert
+  `WAIT_FOR_DOM` quiet-period waits, choose commit mode, and assign to a
+  new or existing button on a new or existing page.
+- **Host-permissions UX** in the editor: per-origin Enable / Disable / Remove
+  controls calling `chrome.permissions.request`, with an "Add origin" form.
+  Granting permission auto-reloads any open matching tabs.
 - Background service worker for hotkeys (`Alt+Shift+T` to toggle the panel,
   `Alt+Shift+E` to open the editor) and toolbar action.
-- Editor (options page) with pages, workflows (commit-mode and LIVE-eligible
-  toggles with the three-runs warning and first-time LIVE tutorial gate),
-  audit log viewer, kill switch and import/export.
-
-Stubbed for later phases:
-
-- `src/content/recorder.ts` — Phase 3 workflow recorder. Public interface is
-  fixed; capture and selector-generation logic is a TODO.
+- Editor (options page) with pages (per-origin permission status), workflows
+  (commit-mode and LIVE-eligible toggles with the three-runs warning and
+  first-time LIVE tutorial gate), audit log viewer, kill switch and JSON
+  import/export.
 
 ## Build
 

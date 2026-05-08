@@ -5,13 +5,15 @@ import type {
   CommitMode,
   DeckButton,
   Origin,
+  Step,
   Workflow,
   Workspace,
 } from '@/shared/types';
 import { arming, ARM_WINDOW_MS_EXPORT } from './arming';
 import { executeWorkflow, type ToastSink } from './executor';
 import { newId } from '@/shared/ids';
-import { loadWorkspace, watchWorkspace } from '@/shared/storage';
+import { loadWorkspace, saveWorkspace, watchWorkspace } from '@/shared/storage';
+import { startRecording, type RecorderHandle } from './recorder';
 
 interface PanelProps {
   open: boolean;
@@ -34,6 +36,10 @@ export function Panel({ open, onClose }: PanelProps) {
   const [armState, setArmState] = useState<ArmingState | null>(null);
   const [now, setNow] = useState(Date.now());
   const abortRef = useRef<AbortController | null>(null);
+  const recorderRef = useRef<RecorderHandle | null>(null);
+  const [recCount, setRecCount] = useState(0);
+  const [recording, setRecording] = useState(false);
+  const [draftSteps, setDraftSteps] = useState<Step[] | null>(null);
 
   useEffect(() => {
     void loadWorkspace().then(setWorkspace);
@@ -138,9 +144,78 @@ export function Panel({ open, onClose }: PanelProps) {
     arming.arm(button.id, wf.id);
   }, [workspace]);
 
-  if (!open || !workspace) return null;
+  if (!workspace) return null;
+
+  const stopAndDiscard = () => {
+    recorderRef.current?.cancel();
+    recorderRef.current = null;
+    setRecording(false);
+    setRecCount(0);
+  };
 
   return (
+    <>
+      {recording && !open && (
+        <div
+          style={{
+            position: 'fixed',
+            right: 24,
+            bottom: 24,
+            zIndex: 2147483647,
+            background: '#3f0d0d',
+            border: '2px solid #ef4444',
+            color: '#fee2e2',
+            padding: '8px 12px',
+            borderRadius: 8,
+            fontFamily: 'system-ui, -apple-system, Segoe UI, sans-serif',
+            display: 'flex',
+            gap: 10,
+            alignItems: 'center',
+            boxShadow: '0 0 14px rgba(239,68,68,0.6)',
+          }}
+        >
+          <span
+            style={{
+              display: 'inline-block',
+              width: 8,
+              height: 8,
+              borderRadius: '50%',
+              background: '#ef4444',
+              boxShadow: '0 0 6px rgba(239,68,68,0.9)',
+            }}
+          />
+          <span style={{ fontSize: 12 }}>REC · {recCount} steps</span>
+          <button onClick={() => recorderRef.current?.undoLast()} style={iconBtn}>
+            ↶
+          </button>
+          <button
+            onClick={async () => {
+              const handle = recorderRef.current;
+              if (!handle) return;
+              const steps = await handle.stop();
+              recorderRef.current = null;
+              setRecording(false);
+              setRecCount(0);
+              setDraftSteps(steps);
+            }}
+            style={{ ...iconBtn, color: '#fee2e2', borderColor: '#ef4444' }}
+          >
+            Stop
+          </button>
+          <button onClick={stopAndDiscard} style={iconBtn}>
+            ×
+          </button>
+        </div>
+      )}
+      {draftSteps && (
+        <SaveWorkflowModal
+          steps={draftSteps}
+          workspace={workspace}
+          onCancel={() => setDraftSteps(null)}
+          onSaved={() => setDraftSteps(null)}
+        />
+      )}
+      {open && (
     <div
       style={{
         position: 'fixed',
@@ -165,7 +240,55 @@ export function Panel({ open, onClose }: PanelProps) {
         }}
       >
         <strong style={{ letterSpacing: 1 }}>TRISKA</strong>
-        <div style={{ display: 'flex', gap: 6 }}>
+        <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+          {recording ? (
+            <>
+              <span
+                style={{
+                  display: 'inline-block',
+                  width: 8,
+                  height: 8,
+                  borderRadius: '50%',
+                  background: '#ef4444',
+                  boxShadow: '0 0 6px rgba(239,68,68,0.8)',
+                }}
+              />
+              <span style={{ fontSize: 11, color: '#fee2e2' }}>
+                REC · {recCount}
+              </span>
+              <button onClick={() => recorderRef.current?.undoLast()} style={iconBtn}>
+                ↶
+              </button>
+              <button
+                onClick={async () => {
+                  const handle = recorderRef.current;
+                  if (!handle) return;
+                  const steps = await handle.stop();
+                  recorderRef.current = null;
+                  setRecording(false);
+                  setRecCount(0);
+                  setDraftSteps(steps);
+                }}
+                style={{ ...iconBtn, color: '#fee2e2', borderColor: '#ef4444' }}
+              >
+                Stop
+              </button>
+            </>
+          ) : (
+            <button
+              onClick={() => {
+                const handle = startRecording();
+                recorderRef.current = handle;
+                handle.subscribe(setRecCount);
+                setRecording(true);
+                onClose();
+              }}
+              style={iconBtn}
+              title="Record a workflow"
+            >
+              ●
+            </button>
+          )}
           <button onClick={() => chrome.runtime.openOptionsPage()} style={iconBtn}>
             ⚙︎
           </button>
@@ -227,13 +350,15 @@ export function Panel({ open, onClose }: PanelProps) {
           </div>
         </>
       )}
+    </div>
+      )}
 
       <div style={{ position: 'fixed', right: 24, top: 24, display: 'flex', flexDirection: 'column', gap: 6, zIndex: 2147483647 }}>
         {toasts.map((t) => (
           <ToastView key={t.id} t={t} />
         ))}
       </div>
-    </div>
+    </>
   );
 }
 
@@ -443,3 +568,307 @@ function effectiveCommitMode({
   if (!armingMatched) return 'CONFIRM';
   return 'LIVE';
 }
+
+function SaveWorkflowModal({
+  steps: initialSteps,
+  workspace,
+  onCancel,
+  onSaved,
+}: {
+  steps: Step[];
+  workspace: Workspace;
+  onCancel: () => void;
+  onSaved: () => void;
+}) {
+  const [steps, setSteps] = useState<Step[]>(initialSteps);
+  const [name, setName] = useState('');
+  const [commitMode, setCommitMode] = useState<CommitMode>('SAFE');
+  const [pageId, setPageId] = useState<string>('__new__');
+  const [newPageName, setNewPageName] = useState('Recorded');
+  const [buttonLabel, setButtonLabel] = useState('');
+
+  const originKey = `${window.location.protocol}//${window.location.host}`;
+  const origin = workspace.origins[originKey];
+
+  const move = (idx: number, dir: -1 | 1) => {
+    const next = [...steps];
+    const j = idx + dir;
+    if (j < 0 || j >= next.length) return;
+    [next[idx], next[j]] = [next[j], next[idx]];
+    setSteps(next);
+  };
+  const remove = (idx: number) => {
+    const next = [...steps];
+    next.splice(idx, 1);
+    setSteps(next);
+  };
+  const insertWait = (idx: number) => {
+    const next = [...steps];
+    next.splice(idx, 0, {
+      id: newId('step'),
+      type: 'WAIT_FOR_DOM',
+      condition: 'QUIET',
+      timeoutMs: 2000,
+      quietMs: 250,
+    });
+    setSteps(next);
+  };
+
+  const hasInjectText = steps.some((s) => s.type === 'INJECT_TEXT');
+
+  const save = async () => {
+    if (!name.trim()) {
+      alert('Name the workflow first.');
+      return;
+    }
+    if (!buttonLabel.trim()) {
+      alert('Give the button a label.');
+      return;
+    }
+    if (!origin) {
+      alert(
+        `No origin entry for ${originKey}. Open the editor → Settings → Permissions to enable it first.`,
+      );
+      return;
+    }
+
+    const wf: Workflow = {
+      id: newId('wf'),
+      name: name.trim(),
+      origin: originKey,
+      steps,
+      commitMode,
+      liveEligible: false,
+      successCount: 0,
+      liveRunCount: 0,
+      createdAt: Date.now(),
+      lastEditedAt: Date.now(),
+      hasDraftRisk: hasInjectText,
+    };
+
+    const button: DeckButton = {
+      id: newId('btn'),
+      label: buttonLabel.trim(),
+      icon: '🎬',
+      color: '#6366f1',
+      action: { kind: 'WORKFLOW', workflowId: wf.id },
+    };
+
+    let pages = origin.pages;
+    if (pageId === '__new__') {
+      const np = {
+        id: newId('page'),
+        name: newPageName.trim() || 'Recorded',
+        buttons: [button],
+      };
+      pages = [...pages, np];
+    } else {
+      pages = pages.map((p) =>
+        p.id === pageId ? { ...p, buttons: [...p.buttons, button] } : p,
+      );
+    }
+
+    const next: Workspace = {
+      ...workspace,
+      origins: {
+        ...workspace.origins,
+        [originKey]: { ...origin, pages },
+      },
+      workflows: { ...workspace.workflows, [wf.id]: wf },
+    };
+    await saveWorkspace(next);
+    onSaved();
+  };
+
+  return (
+    <div
+      style={{
+        position: 'fixed',
+        inset: 0,
+        background: 'rgba(0,0,0,0.6)',
+        zIndex: 2147483647,
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        fontFamily: 'system-ui, -apple-system, Segoe UI, sans-serif',
+      }}
+    >
+      <div
+        style={{
+          background: '#0f172a',
+          color: '#e2e8f0',
+          borderRadius: 12,
+          width: 520,
+          maxHeight: '90vh',
+          overflow: 'auto',
+          padding: 16,
+          border: '1px solid #1e293b',
+        }}
+      >
+        <h3 style={{ margin: 0, marginBottom: 8 }}>Save recorded workflow</h3>
+        <p style={{ fontSize: 12, color: '#94a3b8', marginTop: 0 }}>
+          {steps.length} captured step{steps.length === 1 ? '' : 's'} on{' '}
+          <code>{originKey}</code>
+          {hasInjectText && (
+            <>
+              {' '}— this workflow injects text. Drafts may be left in fields if
+              the workflow is aborted partway; the executor records prior values
+              for one-click rollback.
+            </>
+          )}
+        </p>
+
+        <label style={{ display: 'block', fontSize: 11, marginTop: 8 }}>
+          Workflow name
+        </label>
+        <input
+          value={name}
+          onChange={(e) => setName(e.target.value)}
+          style={input}
+          placeholder="e.g. UTI safety-net send"
+        />
+
+        <label style={{ display: 'block', fontSize: 11, marginTop: 8 }}>
+          Commit mode
+        </label>
+        <select
+          value={commitMode}
+          onChange={(e) => setCommitMode(e.target.value as CommitMode)}
+          style={input}
+        >
+          <option value="SAFE">SAFE — halt before Submit (recommended)</option>
+          <option value="CONFIRM">CONFIRM — pause and prompt before Submit</option>
+          <option value="LIVE">LIVE — runs end-to-end (requires arming)</option>
+        </select>
+
+        <label style={{ display: 'block', fontSize: 11, marginTop: 8 }}>
+          Page
+        </label>
+        <select
+          value={pageId}
+          onChange={(e) => setPageId(e.target.value)}
+          style={input}
+          disabled={!origin}
+        >
+          {origin?.pages.map((p) => (
+            <option key={p.id} value={p.id}>
+              {p.name}
+            </option>
+          ))}
+          <option value="__new__">+ New page…</option>
+        </select>
+        {pageId === '__new__' && (
+          <input
+            value={newPageName}
+            onChange={(e) => setNewPageName(e.target.value)}
+            style={input}
+            placeholder="New page name"
+          />
+        )}
+
+        <label style={{ display: 'block', fontSize: 11, marginTop: 8 }}>
+          Button label
+        </label>
+        <input
+          value={buttonLabel}
+          onChange={(e) => setButtonLabel(e.target.value)}
+          style={input}
+          placeholder="Short label shown on the button"
+        />
+
+        <div style={{ marginTop: 12, fontSize: 11, color: '#94a3b8' }}>Steps</div>
+        <ol style={{ paddingLeft: 0, margin: '6px 0' }}>
+          {steps.map((s, i) => (
+            <li
+              key={s.id}
+              style={{
+                listStyle: 'none',
+                border: '1px solid #1e293b',
+                borderRadius: 4,
+                padding: 6,
+                marginBottom: 4,
+                display: 'flex',
+                alignItems: 'center',
+                gap: 6,
+                fontSize: 11,
+              }}
+            >
+              <span style={{ color: '#64748b', width: 18 }}>{i + 1}</span>
+              <span style={{ flex: 1, fontFamily: 'ui-monospace, monospace' }}>
+                {describeStep(s)}
+              </span>
+              <button onClick={() => move(i, -1)} style={iconBtn} disabled={i === 0}>
+                ↑
+              </button>
+              <button
+                onClick={() => move(i, 1)}
+                style={iconBtn}
+                disabled={i === steps.length - 1}
+              >
+                ↓
+              </button>
+              <button onClick={() => insertWait(i)} style={iconBtn} title="Insert wait above">
+                ⧗
+              </button>
+              <button onClick={() => remove(i)} style={iconBtn}>
+                ×
+              </button>
+            </li>
+          ))}
+          {steps.length === 0 && (
+            <p style={{ fontSize: 11, color: '#94a3b8' }}>No steps captured.</p>
+          )}
+        </ol>
+
+        <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end', marginTop: 12 }}>
+          <button onClick={onCancel} style={{ ...promptBtn, background: '#1f2937', color: '#e2e8f0' }}>
+            Discard
+          </button>
+          <button
+            onClick={save}
+            style={{ ...promptBtn, background: '#22c55e', color: '#052e1b' }}
+          >
+            Save
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function describeStep(s: Step): string {
+  switch (s.type) {
+    case 'NAVIGATE':
+      return `NAVIGATE ${s.url}`;
+    case 'CLICK':
+      return `CLICK ${describeBundle(s.target)}`;
+    case 'INJECT_TEXT':
+      return `INJECT_TEXT ${describeBundle(s.target)} ← ${
+        s.isClinicalSearch
+          ? JSON.stringify(s.text)
+          : `<${s.text.length} chars redacted>`
+      }`;
+    case 'WAIT_FOR_DOM':
+      return `WAIT_FOR_DOM ${s.condition}${s.target ? ' ' + describeBundle(s.target) : ''} t=${s.timeoutMs}`;
+    case 'RUN_WORKFLOW':
+      return `RUN_WORKFLOW ${s.workflowId}`;
+  }
+}
+
+function describeBundle(b: { css?: string; ariaName?: { role?: string; name: string }; text?: string }): string {
+  if (b.css) return `css="${b.css}"`;
+  if (b.ariaName) return `aria=${b.ariaName.role ?? '*'}[${b.ariaName.name}]`;
+  if (b.text) return `text="${b.text}"`;
+  return '<empty>';
+}
+
+const input: React.CSSProperties = {
+  width: '100%',
+  background: '#020617',
+  color: '#e2e8f0',
+  border: '1px solid #1e293b',
+  borderRadius: 4,
+  padding: '4px 6px',
+  fontSize: 12,
+  marginTop: 2,
+};
