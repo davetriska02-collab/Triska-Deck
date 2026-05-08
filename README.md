@@ -44,14 +44,113 @@ Implemented:
   first-time LIVE tutorial gate), audit log viewer, kill switch and JSON
   import/export.
 
-## Build
+## Install
+
+### Prerequisites
+
+- Node.js 18 or newer (`node --version`).
+- Google Chrome, Chromium, Edge, Brave or any Chromium-based browser that
+  supports Manifest V3 unpacked extensions.
+
+### Build the extension
 
 ```sh
+git clone https://github.com/davetriska02-collab/triska-deck.git
+cd triska-deck
+git checkout claude/triska-chrome-extension-jMz0s
 npm install
 npm run build
 ```
 
-Then load `dist/` as an unpacked extension in Chrome.
+The build emits the unpacked extension into `dist/`.
+
+For active development, `npm run dev` keeps Vite watching and rebuilding into
+`dist/`; reload the extension from `chrome://extensions` to pick up changes
+to the background service worker, and reload the page to pick up content-
+script changes.
+
+### Load it in Chrome
+
+1. Open `chrome://extensions`.
+2. Toggle **Developer mode** on (top-right).
+3. Click **Load unpacked** and select the `dist/` folder produced by the
+   build.
+4. The Triska icon will appear in the toolbar. Click the puzzle-piece icon
+   in the toolbar and pin Triska so it's always visible.
+
+### First run — enable the origin you want a deck on
+
+The MVP ships with **no host permissions** at install. Until you grant
+permission for an origin, no deck will appear on its pages.
+
+1. Right-click the Triska toolbar icon → **Options** (or press
+   `Alt+Shift+E` on any tab).
+2. In the editor's **Pages** view you'll see Medicus pre-seeded.
+3. Click **Enable** on the Medicus row. Chrome will prompt:
+   *"Add 'Triska'? It can: Read and change your data on
+   england.medicus.health"* — accept it.
+4. Any open Medicus tabs reload automatically; the panel is now available
+   on those tabs.
+
+To enable a different origin, use the **Add origin** form: paste the URL
+(e.g. `https://england.medicus.health`), give it a label, click **Add
+origin**. Chrome prompts for permission immediately.
+
+### Use the panel
+
+- `Alt+Shift+T` (or click the toolbar icon) toggles the floating panel on
+  the active tab.
+- The panel only appears on origins that (a) have an entry in the workspace
+  *and* (b) have host permission granted.
+- The seeded Medicus task-list buttons use a `{tenant}` placeholder in the
+  URL; until tenant-config UI lands, edit those URLs once via the editor's
+  **Workflows** tab to substitute your actual tenant slug. The right-panel
+  and slash-menu workflows work without any tenant editing.
+
+### Record a workflow
+
+1. With the panel open on a permitted origin, click the **●** button in
+   the panel header. The panel auto-closes; a red **REC** badge appears
+   bottom-right with a step counter.
+2. Demonstrate the workflow on the page. Clicks become `CLICK` steps,
+   typing in a field becomes a single `INJECT_TEXT` (flushed on blur, or on
+   Enter/Tab), and any click that triggers navigation within 500 ms is
+   rewritten as `NAVIGATE`. Use **↶** on the badge to undo the last step.
+3. Click **Stop** on the badge. The save modal opens — name the workflow,
+   pick a commit mode (default **SAFE**), pick a page (or *+ New page…*),
+   give the button a label, optionally reorder steps or insert
+   `WAIT_FOR_DOM` quiet-period waits between any two steps, then **Save**.
+4. The new button appears in the panel.
+
+### Promoting a workflow to LIVE (the safety catch)
+
+Default is **SAFE** — the executor halts before any submit-class step and
+the user fires the final click manually. To run a workflow end-to-end:
+
+1. Editor → **Workflows** → set the workflow's *Mode* to `LIVE`.
+2. Tick **LIVE-eligible**. The first time you do this you'll see a one-shot
+   modal explaining the arming model; if the workflow has fewer than three
+   successful SAFE/CONFIRM runs you'll get a separate warning.
+3. Back on the panel, the button now has a red border and an **ARM** badge
+   in its top-right corner. Tap **ARM** — the badge turns red with a
+   five-second countdown ring. Within those five seconds, tap the button
+   to fire the workflow LIVE. The arm consumes on use; closing the tab,
+   timing out, or successfully running all clear it.
+
+The kill switch in **Settings → LIVE kill switch** disables LIVE
+workspace-wide; ship that on for shared devices.
+
+### Build artefacts
+
+```
+dist/
+  manifest.json
+  service-worker-loader.js
+  src/options/index.html
+  assets/                 # bundled JS + CSS + sourcemaps
+```
+
+`dist/` is the folder you point Chrome at.
 
 ## Safety model
 
